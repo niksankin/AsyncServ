@@ -1,42 +1,3 @@
-/*
-TelnetServLib 
-=============
-
-TelnetServLib is a very light ANSI Telnet Server library for use in apps with 'game
-loops': i.e. update, render. It utilises TCP select to enable it to operate in the 
-main thread.
-
-License
-=======
-
-Copyright (c) 2015, Luke Malcolm
-All rights reserved.
-
-Redistribution and use in source and binary forms, with or without
-modification, are permitted provided that the following conditions are met:
-
-1. Redistributions of source code must retain the above copyright notice, this
-list of conditions and the following disclaimer.
-2. Redistributions in binary form must reproduce the above copyright notice,
-this list of conditions and the following disclaimer in the documentation
-and/or other materials provided with the distribution.
-
-THIS SOFTWARE IS PROVIDED BY THE COPYRIGHT HOLDERS AND CONTRIBUTORS "AS IS" AND
-ANY EXPRESS OR IMPLIED WARRANTIES, INCLUDING, BUT NOT LIMITED TO, THE IMPLIED
-WARRANTIES OF MERCHANTABILITY AND FITNESS FOR A PARTICULAR PURPOSE ARE
-DISCLAIMED. IN NO EVENT SHALL THE COPYRIGHT OWNER OR CONTRIBUTORS BE LIABLE FOR
-ANY DIRECT, INDIRECT, INCIDENTAL, SPECIAL, EXEMPLARY, OR CONSEQUENTIAL DAMAGES
-(INCLUDING, BUT NOT LIMITED TO, PROCUREMENT OF SUBSTITUTE GOODS OR SERVICES;
-LOSS OF USE, DATA, OR PROFITS; OR BUSINESS INTERRUPTION) HOWEVER CAUSED AND
-ON ANY THEORY OF LIABILITY, WHETHER IN CONTRACT, STRICT LIABILITY, OR TORT
-(INCLUDING NEGLIGENCE OR OTHERWISE) ARISING IN ANY WAY OUT OF THE USE OF THIS
-SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
-
-The views and conclusions contained in the software and documentation are those
-of the authors and should not be interpreted as representing official policies,
-either expressed or implied, of the FreeBSD Project.
-*/
-
 #include <winsock2.h>
 #include <windows.h>
 #include <ws2tcpip.h>
@@ -47,42 +8,24 @@ either expressed or implied, of the FreeBSD Project.
 #include <functional>
 #include <list>
 
-#define MAX_WORKER_THREAD   16
 #define MAX_BUFF_SIZE       8192
 
-typedef enum _IO_OPERATION {
+enum IO_OPERATION {
 	ClientIoAccept,
 	ClientIoRead,
 	ClientIoWrite
-} IO_OPERATION, *PIO_OPERATION;
-
-//overlapped - IO info
-//PerSocketContext - session class
+};
 
 class TelnetServer;
 class TelnetSession;
 
-typedef std::shared_ptr<TelnetSession>   SP_TelnetSession;
-typedef std::vector < SP_TelnetSession > VEC_SP_TelnetSession;
-
-typedef std::function< void(SP_TelnetSession) >              FPTR_ConnectedCallback;
-typedef std::function< void(SP_TelnetSession, std::string) > FPTR_NewLineCallback;
-
-extern VEC_SP_TelnetSession m_sessions;
-
-typedef struct _PER_IO_CONTEXT {
+struct IO_CONTEXT {
 	WSAOVERLAPPED               Overlapped;
-	//char                        Buffer[MAX_BUFF_SIZE];
+	IO_OPERATION                operation;
+	TelnetSession*				session;
 	std::shared_ptr<std::vector<char>> Buffer;
 	WSABUF                      wsabuf;
-	int                         nTotalBytes;
-	int                         nSentBytes;
-	IO_OPERATION                IOOperation;
-	SOCKET                      SocketAccept;
-	TelnetSession*            session;
-
-	struct _PER_IO_CONTEXT      *pIOContextForward;
-} PER_IO_CONTEXT, *PPER_IO_CONTEXT;
+};
 
 const std::string ANSI_FG_BLACK   ("\x1b[30m");
 const std::string ANSI_FG_RED     ("\x1b[31m");
@@ -136,25 +79,22 @@ const char SIGTSTP = 0x1a;
 class	TelnetSession : public std::enable_shared_from_this < TelnetSession >
 {
 public:
-    TelnetSession(SOCKET ClientSocket, std::shared_ptr<TelnetServer> ts) : m_socket(ClientSocket), m_telnetServer(ts) 
+    TelnetSession(SOCKET ClientSocket, std::shared_ptr<TelnetServer> ts) : socket(ClientSocket), telnetServer(ts) 
     {
-        m_historyCursor = m_history.end();
+        historyCursor = history.end();
     };
 
 public:
     void sendLine(std::string data);    // Send a line of data to the Telnet Server
-	void asyncRead();
 	bool update(int readBytes, char recvbuf[]);
 	void closeClient();                 // Finish the session
-
-    static void UNIT_TEST();
 
 protected:
     void initialise();                  // 
                           // Called every frame/loop by the Terminal Server
-	void SetTPIO(PTP_IO pTPIO) { m_pTPIO = pTPIO; }
-	PTP_IO GetTPIO() { return m_pTPIO; }
-	SOCKET getSocket() { return m_socket; }
+	void setTPIO(PTP_IO TPIO) { ioThreadpool = TPIO; }
+	PTP_IO getTPIO() { return ioThreadpool; }
+	SOCKET getSocket() { return socket; }
 
 private:
 	void initContext();
@@ -163,29 +103,29 @@ private:
     void echoBack(char * buffer, u_long length);
     static void stripNVT(std::string &buffer);
     static void stripEscapeCharacters(std::string &buffer);                 // Remove all escape characters from the line
-    static bool processBackspace(std::string &buffer);                      // Takes backspace commands and removes them and the preceeding character from the m_buffer. // Handles arrow key actions for history management. Returns true if the input buffer was changed.
+    static bool processBackspace(std::string &buffer);                      // Takes backspace commands and removes them and the preceeding character from the buffer. // Handles arrow key actions for history management. Returns true if the input buffer was changed.
     void addToHistory(std::string line);                                    // Add a command into the command history
     bool processCommandHistory(std::string &buffer);                        // Handles arrow key actions for history management. Returns true if the input buffer was changed.
     static std::vector<std::string> getCompleteLines(std::string &buffer);  
 
 	friend bool operator == (TelnetSession &lhs, TelnetSession &rhs)
 	{
-		return ((lhs.m_socket == rhs.m_socket) && (lhs.m_pTPIO == rhs.m_pTPIO));
+		return ((lhs.socket == rhs.socket) && (lhs.ioThreadpool == rhs.ioThreadpool));
 	}
 
 	friend bool operator == (const TelnetSession &lhs, const TelnetSession &rhs)
 	{
-		return ((lhs.m_socket == rhs.m_socket) && (lhs.m_pTPIO == rhs.m_pTPIO));
+		return ((lhs.socket == rhs.socket) && (lhs.ioThreadpool == rhs.ioThreadpool));
 	}
 
 private:
-    SOCKET m_socket;                // The Winsock socket
-    std::shared_ptr<TelnetServer> m_telnetServer; // Parent TelnetServer class
-    std::string m_buffer;           // Buffer of input data (mid line)
-    std::list<std::string>           m_history;  // A history of all completed commands
-    std::list<std::string>::iterator m_historyCursor;
-	PER_IO_CONTEXT pIOContext;
-	PTP_IO m_pTPIO = NULL;
+    SOCKET socket;                // The Winsock socket
+    std::shared_ptr<TelnetServer> telnetServer; // Parent TelnetServer class
+    std::string buffer;           // Buffer of input data (mid line)
+    std::list<std::string>           history;  // A history of all completed commands
+    std::list<std::string>::iterator historyCursor;
+	IO_CONTEXT ioContext;
+	PTP_IO ioThreadpool = NULL;
 
 friend TelnetServer;
 };
@@ -193,9 +133,9 @@ friend TelnetServer;
 class TelnetServer : public std::enable_shared_from_this < TelnetServer >
 {
 public:
-    TelnetServer() : m_promptString("") 
+    TelnetServer() : promtString("") 
 	{
-		m_initialised = false;
+		isInitialized = false;
 	};
 
 	~TelnetServer()
@@ -206,60 +146,44 @@ public:
     bool initialise(u_long listenPort, int maxAccept, std::string promptString = "");
     void shutdown();
 
-public:
-    void connectedCallback(FPTR_ConnectedCallback f) { m_connectedCallback = f; }
-    FPTR_ConnectedCallback connectedCallback() const { return m_connectedCallback; }
-
-    void newLineCallback(FPTR_NewLineCallback f) { m_newlineCallback = f; }
-    FPTR_NewLineCallback newLineCallBack() const { return m_newlineCallback; }
-
-    //VEC_SP_TelnetSession sessions() const { return m_sessions; }
-
-    bool interactivePrompt() const { return m_promptString.length() > 0; }
-    void promptString(std::string prompt) { m_promptString = prompt; }
-    std::string promptString() const { return m_promptString; }
+    bool interactivePrompt() const { return promtString.length() > 0; }
+    void promptString(std::string prompt) { promtString = prompt; }
+    std::string promptString() const { return promtString; }
 
 private:
-	BOOL CreateListenSocket();
+	BOOL createListenSocket();
 
-	static void CALLBACK IoCompletionCallback(PTP_CALLBACK_INSTANCE /* Instance */, PVOID  /*Context*/,
+	static void CALLBACK ioCompletionCallback(PTP_CALLBACK_INSTANCE /* Instance */, PVOID  /*Context*/,
 		PVOID Overlapped, ULONG IoResult, ULONG_PTR NumberOfBytesTransferred,
 		PTP_IO /* Io */);
-	static void CALLBACK WorkerPostAccept(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context, PTP_WORK /* Work */);
-	static void CALLBACK WorkerAddClient(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context);
-	static void CALLBACK WorkerSendPacket(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context);
-	static void CALLBACK WorkerRecvPacket(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context);
-	static void CALLBACK WorkerRemoveClient(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context);
-	static void AddClient(TelnetSession* session);
-	static void PostRecv(TelnetSession* session);
-	static void PostSend(TelnetSession* session);
-	static void RemoveClient(TelnetSession* session);
-	static void OnSend(TelnetSession* session, int size);
-	static void OnRecv(TelnetSession* session, int size);
-	static void OnAccept(TelnetSession* session);
-	static void OnClose(TelnetSession* session);
-	void PostAccept();
+	static void CALLBACK workerPostAccept(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context, PTP_WORK /* Work */);
+	static void CALLBACK workerAddClient(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context);
+	static void CALLBACK workerSendPacket(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context);
+	static void CALLBACK workerRecvPacket(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context);
+	static void CALLBACK workerRemoveClient(PTP_CALLBACK_INSTANCE /* Instance */, PVOID Context);
+	static void addClient(TelnetSession* session);
+	static void postRecv(TelnetSession* session);
+	static void postSend(TelnetSession* session);
+	static void removeClient(TelnetSession* session);
+	static void onSend(TelnetSession* session, int size);
+	static void onRecv(TelnetSession* session, int size);
+	static void onAccept(TelnetSession* session);
+	static void onClose(TelnetSession* session);
+	void postAccept();
 
 private:
-    u_long m_listenPort;
-    SOCKET m_listenSocket;
-    std::string m_promptString;                     // A string that denotes the current prompt
-	HANDLE g_ThreadHandles[MAX_WORKER_THREAD];
-	DWORD g_dwThreadCount = 0;
-	PTP_IO m_pTPIO = NULL;
-	int	m_MaxPostAccept;
-	TP_CLEANUP_GROUP* m_ClientTPCLEAN;
-	TP_WORK* m_AcceptTPWORK;
+    u_long listenPort;
+    SOCKET listenSocket;
+    std::string promtString;
+	PTP_IO ioThreadpoolAccept = NULL;
+	int	maxSessionCount;
+	TP_CLEANUP_GROUP* sessionCleanupGroup;
+	TP_WORK* acceptWorkerHandle;
 
-	static volatile long m_NumPostAccept;
+	static volatile long postedAcceptNum;
 
-	static bool   m_initialised;
-	static CRITICAL_SECTION m_CSForClients;
-	static TP_CALLBACK_ENVIRON m_ClientTPENV;
-	//static VEC_SP_TelnetSession m_sessions;
-	static std::list<TelnetSession> m_sessions;
-
-protected:
-    FPTR_ConnectedCallback m_connectedCallback;     // Called after the telnet session is initialised. function(SP_TelnetSession) {}
-    FPTR_NewLineCallback   m_newlineCallback;       // Called after every new line (from CR or LF)     function(SP_TelnetSession, std::string) {}
+	static bool   isInitialized;
+	static CRITICAL_SECTION clientCriticalSection;
+	static TP_CALLBACK_ENVIRON clientCallbackEnv;
+	static std::list<TelnetSession> sessions;
 };
